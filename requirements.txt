@@ -4,4 +4,5 @@ yfinance>=1.7
 pyarrow>=25.0
 plotly>=7.0
 python-dotenv>=1.2
+anthropic>=1.8
 pytest>=9.0

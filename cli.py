@@ -1,22 +1,33 @@
-"""Command-line interface for Phase 1.
+"""Command-line interface.
 
-    python cli.py analyze AAPL            # signal + reasons (+ chart with --chart)
-    python cli.py backtest SAP.DE         # how the rules would have done historically
+    python cli.py analyze AAPL --news     # technical + AI news -> combined signal
+    python cli.py analyze AAPL --chart    # technical signal + interactive chart
+    python cli.py news SAP.DE             # AI news analysis only
+    python cli.py backtest SAP.DE         # how the technical rules did historically
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import textwrap
 import webbrowser
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+from core.ai_news import NewsAIError, NewsAIResult, analyze_news
 from core.analysis import analyze
 from core.backtest import run_backtest
-from core.data import DataError
+from core.data import DataError, fetch_info
+from core.fusion import NEWS_WEIGHT, TECH_WEIGHT, combine
+from core.news import NewsBundle, collect_news
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
-DISCLAIMER = "Not financial advice — technical signals only; news analysis arrives in Phase 2."
+ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = ROOT / "output"
+DISCLAIMER = "Not financial advice — research signals only. You make the decision."
+BAR = "=" * 64
+LINE = "-" * 64
 
 
 def _fmt(v: float, suffix: str = "", sign: bool = False) -> str:
@@ -25,25 +36,87 @@ def _fmt(v: float, suffix: str = "", sign: bool = False) -> str:
     return f"{v:+.1f}{suffix}" if sign else f"{v:.1f}{suffix}"
 
 
+def _wrap(text: str, indent: str = "   ") -> str:
+    return textwrap.fill(text, width=64, initial_indent=indent, subsequent_indent=indent)
+
+
+def _run_news(ticker: str, company: str, args: argparse.Namespace) -> tuple[NewsBundle, NewsAIResult | None]:
+    bundle = collect_news(ticker, company, days=args.days)
+    if not bundle.articles:
+        return bundle, None
+    res = analyze_news(ticker, company, bundle.articles, model=args.model, use_cache=not args.refresh)
+    return bundle, res
+
+
+def _print_news(bundle: NewsBundle, res: NewsAIResult | None, days: int, show_headlines: bool) -> None:
+    print(f" NEWS — last {days} days, {len(bundle.articles)} articles")
+    for provider, err in bundle.errors.items():
+        print(f"   ! {provider} unavailable: {err[:80]}")
+    if res is None:
+        print("   No recent news found — combined signal uses technicals only.")
+        return
+    a = res.analysis
+    print(f" News view: {a.signal}   sentiment {a.sentiment:+.2f}, confidence {a.confidence:.2f} "
+          f"→ news score {res.score:+.0f}")
+    print(f" Relevant articles: {a.relevant_articles} of {res.articles_used}   horizon: {a.horizon}")
+    print(LINE)
+    print(_wrap(a.summary, " "))
+    if a.key_events:
+        print(" Key events:")
+        icon = {"positive": "+", "negative": "-", "neutral": "·"}
+        for ev in a.key_events:
+            print(_wrap(f"[{icon[ev.impact]}] {ev.headline} ({ev.category}, {ev.importance})", "   "))
+    for label, items in (("Catalysts", a.catalysts), ("Risks", a.risks)):
+        if items:
+            print(f" {label}:")
+            for item in items:
+                print(_wrap(f"• {item}", "   "))
+    if show_headlines:
+        print(" Headlines:")
+        for art in bundle.articles:
+            print(f"   {art.published:%m-%d} {art.source[:18]:18} {art.title[:70]}")
+    cost = "cached, free" if res.cached else (
+        f"{res.input_tokens + res.cache_read_tokens + res.cache_write_tokens} in / {res.output_tokens} out tokens"
+        + (f", ≈ ${res.cost_usd:.3f}" if res.cost_usd is not None else ""))
+    print(f" ({res.model}; {cost})")
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     ta = analyze(args.ticker, period=args.period, use_cache=not args.refresh)
-    bar = "=" * 64
-    print(bar)
+    print(BAR)
     print(f" {ta.name} ({ta.ticker})   {ta.date:%Y-%m-%d}")
     print(f" Close {ta.close:.2f} {ta.currency}  ({ta.change_pct:+.2f}% today)")
-    print(bar)
-    print(f" SIGNAL: {ta.signal}    technical score {ta.score:+.0f} / 100")
-    print(f" (BUY ≥ +35, SELL ≤ -35)")
-    print("-" * 64)
-    print(" Why:")
+    print(BAR)
+    print(f" TECHNICAL: {ta.signal}    score {ta.score:+.0f} / 100   (BUY ≥ +35, SELL ≤ -35)")
+    print(LINE)
     for pts, text in ta.reasons:
         print(f"   {pts:+5.0f}  {text}" if pts else f"          {text}")
     s = ta.snapshot
-    print("-" * 64)
+    print(LINE)
     print(f" RSI {s['rsi']:.1f} | MACD hist {s['macd_hist']:+.2f} | %B {s['bb_pct']:.2f} | "
           f"ATR {s['atr']:.2f} | Vol× {s['vol_ratio']:.2f}")
     print(f" EMA20 {s['ema20']:.2f} | EMA50 {s['ema50']:.2f} | EMA200 {s['ema200']:.2f}")
-    print(bar)
+
+    if args.news:
+        print(BAR)
+        news_score = None
+        try:
+            bundle, res = _run_news(ta.ticker, ta.name, args)
+            _print_news(bundle, res, args.days, args.headlines)
+            news_score = res.score if res else None
+        except NewsAIError as e:
+            print(f" News analysis failed: {e}")
+        c = combine(ta.score, news_score)
+        print(BAR)
+        if news_score is None:
+            print(f" COMBINED SIGNAL: {c.signal}   (technical only, score {c.score:+.0f})")
+        else:
+            print(f" COMBINED SIGNAL: {c.signal}   score {c.score:+.0f}  "
+                  f"= {TECH_WEIGHT:.0%} × technical {c.technical_score:+.0f} + {NEWS_WEIGHT:.0%} × news {c.news_score:+.0f}")
+            if c.agreement == "conflict":
+                print(" ⚠ Technicals and news point in opposite directions — treat with extra caution.")
+
+    print(BAR)
     print(f" {DISCLAIMER}")
 
     if args.chart:
@@ -54,6 +127,17 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         print(f" Chart saved: {path}")
         if not args.no_open:
             webbrowser.open(path.as_uri())
+
+
+def cmd_news(args: argparse.Namespace) -> None:
+    info = fetch_info(args.ticker)
+    print(BAR)
+    print(f" {info['name']} ({info['ticker']})")
+    print(BAR)
+    bundle, res = _run_news(info["ticker"], info["name"], args)
+    _print_news(bundle, res, args.days, args.headlines)
+    print(BAR)
+    print(f" {DISCLAIMER}")
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
@@ -93,8 +177,9 @@ def cmd_backtest(args: argparse.Namespace) -> None:
 def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    load_dotenv(ROOT / ".env")
 
-    p = argparse.ArgumentParser(description="Stock signals — Phase 1 (technical engine)")
+    p = argparse.ArgumentParser(description="Stock signals — technical + AI news analysis")
     sub = p.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
@@ -102,11 +187,20 @@ def main(argv: list[str] | None = None) -> int:
     common.add_argument("--period", default="5y", help="history to download (default 5y)")
     common.add_argument("--refresh", action="store_true", help="ignore the local cache")
 
-    a = sub.add_parser("analyze", parents=[common], help="current signal with reasons")
+    news_opts = argparse.ArgumentParser(add_help=False)
+    news_opts.add_argument("--days", type=int, default=7, help="news lookback in days (default 7)")
+    news_opts.add_argument("--model", default=None, help="override NEWS_MODEL, e.g. claude-sonnet-5")
+    news_opts.add_argument("--headlines", action="store_true", help="also list the raw headlines")
+
+    a = sub.add_parser("analyze", parents=[common, news_opts], help="current signal with reasons")
+    a.add_argument("--news", action="store_true", help="add AI news analysis and a combined signal")
     a.add_argument("--chart", action="store_true", help="save an interactive HTML chart")
     a.add_argument("--bars", type=int, default=180, help="bars shown on the chart")
     a.add_argument("--no-open", action="store_true", help="don't open the chart in a browser")
     a.set_defaults(func=cmd_analyze)
+
+    n = sub.add_parser("news", parents=[common, news_opts], help="AI news analysis only")
+    n.set_defaults(func=cmd_news)
 
     b = sub.add_parser("backtest", parents=[common], help="historical performance of the rules")
     b.add_argument("--fee", type=float, default=0.25, help="cost per side in %% (default 0.25)")
@@ -117,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         args.func(args)
-    except (DataError, ValueError) as e:
+    except (DataError, NewsAIError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     return 0
