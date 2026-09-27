@@ -6,3 +6,4 @@ plotly>=7.0
 python-dotenv>=1.2
 anthropic>=1.8
 pytest>=9.0
+streamlit>=1.64

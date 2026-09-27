@@ -14,7 +14,27 @@ python -m venv .venv
 copy .env.example .env     # then paste your ANTHROPIC_API_KEY (and optional FINNHUB_API_KEY)
 ```
 
-## Usage
+## Dashboard
+
+```powershell
+.\.venv\Scripts\streamlit run app_streamlit.py     # opens on http://localhost:8501
+```
+
+Sidebar: ticker, history, chart length, AI news on/off, news model. Tabs: Chart, Why (score
+breakdown), News, Backtest (equity curve vs buy & hold), Data (table + CSV download).
+Follows your light/dark theme. Stop it with Ctrl+C in the terminal.
+
+### Virtual trade (paper trading)
+
+Tab **💶 Virtual trade**: enter an amount in EUR and "buy" at the latest price. EUR is converted
+to the stock's currency at the current rate and a fee (default 0.25 % per side) is taken, so P&L
+includes stock moves, currency moves and costs, like a real Revolut trade. Positions are saved in
+`data/paper_trades.json` (git-ignored); sell or delete them from the portfolio table.
+
+Also shows two instant what-ifs: the amount invested at the **last BUY signal** until today
+(with historical FX), and the amount **following every signal** vs buy & hold.
+
+## Command line
 
 ```powershell
 .\.venv\Scripts\python cli.py analyze AAPL --news    # technical + AI news -> combined signal
@@ -80,10 +100,12 @@ core/
   scoring.py     technical score, signal mapping, explanations
   news.py        news collection (Finnhub, Google News RSS, Yahoo)
   ai_news.py     Claude news analysis -> validated NewsAnalysis (structured output + cache)
+  paper.py       virtual trades in EUR (FX + fees) and what-if maths
   fusion.py      technical + news -> combined signal
   analysis.py    analyze(ticker) — shared entry point for CLI / Streamlit / Telegram
   backtest.py    long-only backtest + signal hit rates
   chart.py       Plotly candlestick chart with patterns and signals
+app_streamlit.py   Streamlit dashboard
 cli.py
 tests/
 ```
@@ -92,6 +114,6 @@ tests/
 
 1. ✅ Core engine + backtester
 2. ✅ Claude news analysis + combined signal
-3. Streamlit dashboard
+3. ✅ Streamlit dashboard
 4. Telegram bot (`/analyze`, `/watch`)
 5. ML model (LightGBM, walk-forward) + signal fusion tuning

@@ -2,5 +2,6 @@
 __pycache__/
 .pytest_cache/
 data/cache/
+data/paper_trades.json
 output/
 .env
