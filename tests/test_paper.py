@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.paper import PaperBook, open_trade, realized, value_trade, whatif_last_buy
+from core.paper import GistStore, PaperBook, open_trade, realized, value_trade, whatif_last_buy
 
 
 def test_eur_stock_no_fee():
@@ -80,3 +80,39 @@ def test_whatif_with_fx_history_and_no_buy():
     # 900 EUR -> 1000 USD -> 10 sh; now 10*110 USD * 0.99 = 1089 EUR
     assert w["valuation"].value_eur == pytest.approx(1089)
     assert whatif_last_buy(frame, pd.Series(["HOLD"] * 3, index=frame.index), 900, "USD") is None
+
+
+# ---------- storage backends ----------
+
+class FakeGist(GistStore):
+    """GistStore with the HTTP layer replaced by an in-memory dict."""
+    def __init__(self):
+        super().__init__("token", "abc123")
+        self.files, self.calls = {}, []
+
+    def _request(self, method, url, body=None):
+        self.calls.append(method)
+        if method == "PATCH":
+            for name, f in body["files"].items():
+                self.files[name] = f["content"]
+        return {"files": {n: {"content": c, "truncated": False} for n, c in self.files.items()}}
+
+
+def test_gist_store_roundtrip():
+    store = FakeGist()
+    book = PaperBook(store=store)
+    assert book.load() == []
+    t = open_trade("AAPL", "Apple", 1000, 100, "USD", 0.9, fee_pct=0)
+    book.add(t)
+    assert [x.id for x in PaperBook(store=store).load()] == [t.id]
+    assert store.calls.count("PATCH") == 1
+    assert "gist" in book.describe().lower()
+
+
+def test_default_store_picks_gist_only_with_both_env_vars(monkeypatch):
+    from core import paper
+    monkeypatch.delenv("PAPER_GIST_ID", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "t")
+    assert isinstance(paper.default_store(), paper.FileStore)
+    monkeypatch.setenv("PAPER_GIST_ID", "g")
+    assert isinstance(paper.default_store(), paper.GistStore)

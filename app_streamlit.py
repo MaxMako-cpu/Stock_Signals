@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
+import hmac
 import os
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -28,6 +28,34 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 
 st.set_page_config(page_title="Stock Signals", page_icon="📈", layout="wide")
+
+# On Streamlit Cloud, keys live in the app's Secrets instead of .env
+try:
+    for _k, _v in st.secrets.items():
+        if isinstance(_v, str):
+            os.environ.setdefault(_k, _v)
+except Exception:
+    pass  # no secrets file locally
+
+
+def require_password() -> None:
+    """Block the app behind APP_PASSWORD when it is set (always set it when deployed)."""
+    expected = os.getenv("APP_PASSWORD", "")
+    if not expected or st.session_state.get("authed"):
+        return
+    st.title("📈 Stock Signals")
+    with st.form("login"):
+        pw = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Enter", type="primary")
+    if ok and hmac.compare_digest(pw.encode(), expected.encode()):
+        st.session_state["authed"] = True
+        st.rerun()
+    if ok:
+        st.error("Wrong password.")
+    st.stop()
+
+
+require_password()
 
 SIGNAL_ICON = {"BUY": "▲", "SELL": "▼", "HOLD": "●", "N/A": "–"}
 SIGNAL_BADGE = {"BUY": "green", "SELL": "red", "HOLD": "gray", "N/A": "gray"}
@@ -338,7 +366,12 @@ with tab_paper:
     # ----- portfolio -----
     st.divider()
     st.subheader("My virtual portfolio")
-    trades = book.load()
+    try:
+        trades = book.load()
+    except Exception as e:
+        st.error(f"Could not load virtual trades from {book.describe()}: {e}")
+        trades = []
+    st.caption(f"Saved in: {book.describe()}")
     open_trades = [t for t in trades if t.status == "open"]
     closed_trades = [t for t in trades if t.status == "closed"]
 

@@ -9,8 +9,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 import textwrap
+import urllib.error
 import webbrowser
 from pathlib import Path
 
@@ -140,6 +143,35 @@ def cmd_news(args: argparse.Namespace) -> None:
     print(f" {DISCLAIMER}")
 
 
+def _set_env_var(name: str, value: str) -> None:
+    """Set NAME=value in .env, replacing an existing line or appending one."""
+    path = ROOT / ".env"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for i, line in enumerate(lines):
+        if line.strip().startswith(f"{name}="):
+            lines[i] = f"{name}={value}"
+            break
+    else:
+        lines.append(f"{name}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cmd_gist_setup(args: argparse.Namespace) -> None:
+    from core.paper import BOOK_PATH, FileStore, GistStore
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    if not token:
+        raise ValueError("Set GITHUB_TOKEN in .env first (a GitHub token with Gists read/write).")
+    if os.getenv("PAPER_GIST_ID", "").strip() and not args.force:
+        raise ValueError("PAPER_GIST_ID is already set in .env (use --force to create a new Gist).")
+    local = FileStore(BOOK_PATH).read() or "[]"
+    count = len(json.loads(local))
+    store = GistStore.create(token, local)
+    _set_env_var("PAPER_GIST_ID", store.gist_id)
+    print(f" Created private Gist {store.gist_id} with {count} existing trade(s).")
+    print(" PAPER_GIST_ID saved to .env. Add the same GITHUB_TOKEN and PAPER_GIST_ID to the")
+    print(" Streamlit Cloud Secrets so the cloud dashboard uses the same portfolio.")
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     ta = analyze(args.ticker, period=args.period, use_cache=not args.refresh, with_info=False)
     res = run_backtest(ta.frame, ta.signals, fee_pct=args.fee, horizon=args.horizon)
@@ -208,10 +240,14 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--csv", action="store_true", help="save the trade list as CSV")
     b.set_defaults(func=cmd_backtest)
 
+    g = sub.add_parser("gist-setup", help="store virtual trades in a private GitHub Gist")
+    g.add_argument("--force", action="store_true", help="create a new Gist even if one is set")
+    g.set_defaults(func=cmd_gist_setup)
+
     args = p.parse_args(argv)
     try:
         args.func(args)
-    except (DataError, NewsAIError, ValueError) as e:
+    except (DataError, NewsAIError, ValueError, urllib.error.URLError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     return 0

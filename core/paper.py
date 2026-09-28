@@ -5,12 +5,16 @@ converted to the stock's currency at the current FX rate (like Revolut
 does), minus a fee. Later the position is valued at the current price and
 FX rate, minus the exit fee, so P&L includes both stock and currency moves.
 
-Trades are stored in data/paper_trades.json.
+Trades are stored in data/paper_trades.json, or in a private GitHub Gist
+when GITHUB_TOKEN and PAPER_GIST_ID are set (so the PC, the cloud dashboard
+and the bot share one portfolio).
 """
 
 from __future__ import annotations
 
 import json
+import os
+import urllib.request
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -22,6 +26,7 @@ import yfinance as yf
 from .data import fetch_ohlcv
 
 BOOK_PATH = Path(__file__).resolve().parent.parent / "data" / "paper_trades.json"
+GIST_FILE = "paper_trades.json"
 BASE = "EUR"
 DEFAULT_FEE_PCT = 0.25
 
@@ -135,20 +140,86 @@ def value_trade(trade: PaperTrade, price: float, currency: str, fx: float) -> Va
 
 # ---------- storage ----------
 
-class PaperBook:
-    def __init__(self, path: Path | None = None):
-        self.path = Path(path or BOOK_PATH)
+class FileStore:
+    def __init__(self, path: Path):
+        self.path = Path(path)
 
-    def load(self) -> list[PaperTrade]:
-        if not self.path.exists():
-            return []
-        return [PaperTrade(**d) for d in json.loads(self.path.read_text(encoding="utf-8"))]
+    def read(self) -> str | None:
+        return self.path.read_text(encoding="utf-8") if self.path.exists() else None
 
-    def _save(self, trades: list[PaperTrade]) -> None:
+    def write(self, text: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps([asdict(t) for t in trades], indent=2), encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(self.path)
+
+    def describe(self) -> str:
+        return f"local file {self.path}"
+
+
+class GistStore:
+    """One JSON file inside a private GitHub Gist."""
+    API = "https://api.github.com/gists"
+
+    def __init__(self, token: str, gist_id: str):
+        self.token, self.gist_id = token, gist_id
+
+    def _request(self, method: str, url: str, body: dict | None = None) -> dict:
+        req = urllib.request.Request(url, method=method,
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Authorization": f"Bearer {self.token}",
+                                              "Accept": "application/vnd.github+json",
+                                              "User-Agent": "stock-signals"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read())
+
+    def read(self) -> str | None:
+        f = self._request("GET", f"{self.API}/{self.gist_id}")["files"].get(GIST_FILE)
+        if not f:
+            return None
+        if f.get("truncated"):
+            return urllib.request.urlopen(f["raw_url"], timeout=20).read().decode()
+        return f["content"]
+
+    def write(self, text: str) -> None:
+        self._request("PATCH", f"{self.API}/{self.gist_id}", {"files": {GIST_FILE: {"content": text}}})
+
+    def describe(self) -> str:
+        return f"GitHub Gist {self.gist_id[:8]}…"
+
+    @classmethod
+    def create(cls, token: str, initial: str = "[]") -> "GistStore":
+        store = cls(token, "")
+        data = store._request("POST", cls.API, {
+            "description": "Stock Signals — virtual trades", "public": False,
+            "files": {GIST_FILE: {"content": initial}}})
+        store.gist_id = data["id"]
+        return store
+
+
+def default_store():
+    token = os.getenv("GITHUB_TOKEN", "").strip()
+    gist_id = os.getenv("PAPER_GIST_ID", "").strip()
+    if token and gist_id:
+        return GistStore(token, gist_id)
+    return FileStore(BOOK_PATH)
+
+
+class PaperBook:
+    def __init__(self, path: Path | None = None, store=None):
+        self.store = store or (FileStore(path) if path else default_store())
+
+    def describe(self) -> str:
+        return self.store.describe()
+
+    def load(self) -> list[PaperTrade]:
+        text = self.store.read()
+        if not text or not text.strip():
+            return []
+        return [PaperTrade(**d) for d in json.loads(text)]
+
+    def _save(self, trades: list[PaperTrade]) -> None:
+        self.store.write(json.dumps([asdict(t) for t in trades], indent=2))
 
     def add(self, trade: PaperTrade) -> None:
         self._save(self.load() + [trade])
